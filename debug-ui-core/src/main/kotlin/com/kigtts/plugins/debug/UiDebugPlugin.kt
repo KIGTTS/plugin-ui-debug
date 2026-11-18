@@ -3,6 +3,7 @@ package com.kigtts.plugins.debug
 import com.kigtts.plugin.api.*
 import kotlinx.serialization.json.*
 import java.io.File
+import java.util.Locale
 
 /** UI probes use the public contribution protocol; the host owns their appearance. */
 class UiDebugPlugin(
@@ -11,11 +12,16 @@ class UiDebugPlugin(
     initialStyles: Map<UiSlot, UiButtonStyle> = emptyMap(),
     private val saveStyles: (Map<UiSlot, UiButtonStyle>) -> Unit = {},
 ) : KigPlugin {
-    override val descriptor = PluginDescriptor("debug.ui", "界面调试插件", "在指定扩展区域插入指定数量的按钮或菜单项")
+    override val descriptor = PluginDescriptor("debug.ui", "界面调试插件", "在指定扩展区域插入指定数量的按钮或菜单项", version = "0.1.1")
+    override val localization = PluginLocalization("zh-CN", listOf("zh-CN", "zh-CN-x-casual", "en", "ko", "ja"))
+    private var strings = PluginStrings(emptyMap())
+    private var environment: PluginEnvironment? = null
     private val counts = UiSlot.entries.associateWith { initialCounts[it]?.coerceIn(0, 20) ?: 0 }.toMutableMap()
     private val styles = UiSlot.entries.associateWith { initialStyles[it] ?: UiButtonStyle.ICON }.toMutableMap()
     private var configuration: File? = null
     override suspend fun attach(environment: PluginEnvironment) {
+        this.environment = environment
+        strings = PluginStrings.fromAssets(environment.assets)
         val file = environment.storage.file("config/ui-probes.json"); configuration = file
         if (!file.isFile) return
         runCatching { PluginJson.parseToJsonElement(file.readText(Charsets.UTF_8)).jsonObject }.getOrNull()?.let { state ->
@@ -36,18 +42,22 @@ class UiDebugPlugin(
         java.nio.file.Files.move(next.toPath(), file.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
     }
 
-    override val contributions: PluginContributions get() = PluginContributions(
+    override val contributions get() = contributionsFor(environment?.locale ?: "zh-CN")
+    override fun contributions(context: PluginContext) = contributionsFor(context.locale)
+    private fun contributionsFor(locale: String) = PluginContributions(
         actions = UiSlot.entries.flatMap { slot ->
             List(counts.getValue(slot)) { index ->
-                UiAction(slot.name + "/" + index, label(slot) + " · " + (index + 1), slot, PluginIcon.STAR,
+                UiAction(slot.name + "/" + index, label(slot, locale) + " · " + (index + 1), slot, PluginIcon.STAR,
                     if (slot == UiSlot.EDITOR_MENU) UiPresentation.MENU_ITEM else UiPresentation.BUTTON, index, styles.getValue(slot))
             }
         },
-        settingsEntries = listOf(SettingsEntry("config", "界面调试", "config", PluginIcon.SETTINGS,
-            cardId = "development", cardTitle = "开发与调试", symbol = "bug_report")),
+        settingsEntries = listOf(SettingsEntry("config", strings.text("title", locale, fallback = "界面调试"), "config", PluginIcon.SETTINGS,
+            cardId = "development", cardTitle = strings.text("category", locale, fallback = "开发与调试"), symbol = "bug_report")),
     )
 
     override suspend fun execute(actionId: String, context: PluginContext): PluginOutcome {
+        val locale = context.locale
+        fun text(key: String, vararg args: Pair<String, String>) = strings.text(key, locale, args.toMap())
         if (actionId == "reset") {
             counts.keys.forEach { counts[it] = 0 }; save(counts.toMap()); persist()
             return PluginOutcome.RefreshUi
@@ -66,46 +76,48 @@ class UiDebugPlugin(
                 save(counts.toMap()); persist()
                 return PluginOutcome.RefreshUi
             }
-            return PluginOutcome.Menu("调试入口 · " + label(slot), listOf(
-                PageAction("info", "显示对话框", PluginIcon.INFO), PageAction("config", "打开调试页面", PluginIcon.SETTINGS)))
+            return PluginOutcome.Menu(text("entry", "slot" to label(slot, locale)), listOf(
+                PageAction("info", text("show_dialog"), PluginIcon.INFO), PageAction("config", text("open_page"), PluginIcon.SETTINGS)))
         }
         return when (actionId) {
             "web-demo" -> PluginOutcome.PresentContent(SubtitleContent.Html(html = """
-                <!doctype html><html lang="zh"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+                <!doctype html><html lang="${Locale.forLanguageTag(locale).toLanguageTag()}"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
                 <style>body{font:20px system-ui;margin:24px;background:#e0f4f3;color:#00383b}button{border:0;border-radius:100px;padding:16px 24px;background:#00696e;color:white;font:inherit}</style>
-                <h2>插件网页</h2><p>这块内容由插件提供，可在大字幕区域交互。</p>
-                <button onclick='Kigtts.postMessage(JSON.stringify({action:"web-click",inputs:{source:"demo"}}))'>调用插件动作</button></html>
-            """.trimIndent(), description = "插件网页示例", allowedActions = listOf("web-click")))
-            "web-click" -> PluginOutcome.Message("网页按钮已通过声明的插件接口调用成功")
+                <h2>${escapeHtml(text("web.title"))}</h2><p>${escapeHtml(text("web.info"))}</p>
+                <button onclick='Kigtts.postMessage(JSON.stringify({action:"web-click",inputs:{source:"demo"}}))'>${escapeHtml(text("web.button"))}</button></html>
+            """.trimIndent(), description = text("web.demo"), allowedActions = listOf("web-click")))
+            "web-click" -> PluginOutcome.Message(text("web.success"))
             "config" -> PluginOutcome.OpenPage("config")
-            "info" -> PluginOutcome.Dialog("调试按钮", "此按钮由调试插件注册，外观和交互由所在区域统一提供。")
-            else -> PluginOutcome.Message("未知调试操作")
+            "info" -> PluginOutcome.Dialog(text("dialog.title"), text("dialog.text"))
+            else -> PluginOutcome.Message(text("unknown"))
         }
     }
 
-    override fun page(pageId: String, context: PluginContext) = if (pageId == "config") PluginPage("config", "界面调试", buildList {
-        add(PageBlock.Text("扩展区域测试", heading = true))
-        add(PageBlock.Text("每个区域可插入 0–20 个入口。默认全部关闭，设置自动保存；按钮继承所在区域的外观。"))
-        add(PageBlock.Actions(listOf(PageAction("reset", "清空全部调试入口"))))
-        add(PageBlock.Actions(listOf(PageAction("web-demo", "显示插件网页示例", PluginIcon.TEXT))))
-        UiSlot.entries.forEach { slot ->
-            add(PageBlock.Group(label(slot), listOf(
-                PageBlock.Text("当前数量：" + counts.getValue(slot)),
-                PageBlock.Text(if (styles.getValue(slot) == UiButtonStyle.ICON) "图标按钮" else "图标文字按钮 · 窄空间自动压缩"),
-                PageBlock.Actions(listOf(PageAction(slot.name + "/remove", "减少 · " + label(slot), PluginIcon.MENU),
-                    PageAction(slot.name + "/add", "增加 · " + label(slot), PluginIcon.ADD),
-                    PageAction(slot.name + "/style", "切换样式 · " + label(slot), PluginIcon.TEXT))),
-            )))
-        }
-    }) else null
-
-    private fun label(slot: UiSlot) = when (slot) {
-        UiSlot.HEADER_START -> "顶栏左侧"; UiSlot.HEADER_END -> "顶栏右侧"
-        UiSlot.EDITOR_TOP_START -> "字幕左上"; UiSlot.EDITOR_TOP_END -> "字幕右上"
-        UiSlot.EDITOR_MENU -> "文本菜单"; UiSlot.EDITOR_BOTTOM_START -> "字幕左下"; UiSlot.EDITOR_BOTTOM_END -> "字幕右下"
-        UiSlot.LISTENING_BOTTOM_START -> "聆听面板底部左侧"; UiSlot.LISTENING_BOTTOM_END -> "聆听面板底部右侧"
-        UiSlot.QUICK_PANEL_START -> "面板标题左侧"; UiSlot.QUICK_PANEL_END -> "面板标题右侧"
-        UiSlot.VOICE_INPUT_RELEASE -> "语音输入释放区"
-        UiSlot.TAB_START -> "标签开头"; UiSlot.TAB_END -> "标签末尾"
+    override fun page(pageId: String, context: PluginContext): PluginPage? {
+        if (pageId != "config") return null
+        val locale = context.locale
+        fun text(key: String, vararg args: Pair<String, String>) = strings.text(key, locale, args.toMap())
+        return PluginPage("config", text("title"), buildList {
+            add(PageBlock.Text(text("test.title"), heading = true))
+            add(PageBlock.Text(text("test.info")))
+            add(PageBlock.Actions(listOf(PageAction("reset", text("reset")))))
+            add(PageBlock.Actions(listOf(PageAction("web-demo", text("web.show"), PluginIcon.TEXT))))
+            UiSlot.entries.forEach { slot ->
+                val label = label(slot, locale)
+                val selectedStyle = if (styles.getValue(slot) == UiButtonStyle.ICON) "style.icon" else "style.icon_text"
+                add(PageBlock.Group(label, listOf(
+                    PageBlock.Text(text("count", "count" to counts.getValue(slot).toString())),
+                    PageBlock.Text(text(selectedStyle)),
+                    PageBlock.Actions(listOf(
+                        PageAction(slot.name + "/remove", text("remove", "slot" to label), PluginIcon.MENU),
+                        PageAction(slot.name + "/add", text("add", "slot" to label), PluginIcon.ADD),
+                        PageAction(slot.name + "/style", text("style.switch", "slot" to label), PluginIcon.TEXT)
+                    ))
+                )))
+            }
+        })
     }
+
+    private fun label(slot: UiSlot, locale: String) = strings.text("slot.${slot.name}", locale, fallback = slot.name)
+    private fun escapeHtml(text: String) = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 }
